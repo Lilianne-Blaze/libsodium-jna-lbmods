@@ -9,7 +9,10 @@ import com.muquit.libsodiumjna.exceptions.SodiumLibraryException;
 import com.sun.jna.Library;
 import com.sun.jna.Native;
 import com.sun.jna.NativeLong;
+import com.sun.jna.Platform;
 import com.sun.jna.Pointer;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 
 /**
  * SodiumLibrary is a Java binding to <a href="https://download.libsodium.org/doc/" target="_blank">libsodium</a> crypto C APIs 
@@ -114,6 +117,14 @@ public class SodiumLibrary
     {
         if (SodiumLibrary.libPath == null)
         {
+            logger.debug("libpath not set, trying to find lib");
+            tryFindLib();
+            if( SodiumLibrary.libPath == null)
+            {
+                logger.info("libpath not set, throw exception");
+                throw new RuntimeException("Please set the absolute path of the libsodium libary by calling SodiumLibrary.setLibraryPath(path)");
+            }
+
             logger.info("libpath not set, throw exception");
             throw new RuntimeException("Please set the absolute path of the libsodium libary by calling SodiumLibrary.setLibraryPath(path)");
         }
@@ -130,6 +141,25 @@ public class SodiumLibrary
         	initialized = true;
         }
         return sodium;
+    }
+
+    private static void tryFindLib() {
+        if (Platform.isWindows()) {
+            // use env var, as it's possible we're running in Windows PE with X:\Windows
+            String s1 = System.getenv("SystemRoot") + "\\System32\\libsodium.dll";
+            if (Files.isReadable(Paths.get(s1))) {
+                SodiumLibrary.libPath = s1;
+                logger.debug("found {}",s1);
+                return;
+            }
+        }
+
+        String s2 = "./libsodium.dll";
+        if (Files.isReadable(Paths.get(s2))) {
+            SodiumLibrary.libPath = s2;
+            logger.debug("found {}",s2);
+            return;
+        }
     }
 
     private static final class SingletonHelper
@@ -272,6 +302,7 @@ public class SodiumLibrary
         long crypto_sign_secretkeybytes();
         long crypto_sign_publickeybytes();
         int crypto_sign_keypair(byte[] pk, byte[] sk);
+        int crypto_sign_seed_keypair(byte[] pk, byte[] sk, byte[] seed);
         int crypto_sign_ed25519_bytes();
         int crypto_sign_bytes();
         
@@ -362,6 +393,25 @@ public class SodiumLibrary
         if (rc != 0)
         {
             throw new SodiumLibraryException("libsodium crypto_sign_keypair() failed, returned " + rc + ", expected 0");
+        }
+        kp.setPublicKey(publicKey);
+        kp.setPrivateKey(privateKey);
+        if (logger.isDebugEnabled()) {
+            logger.debug("pk len: " + publicKey.length);
+            logger.debug("sk len: " + privateKey.length);
+        }
+        return kp;
+    }
+    
+    public static SodiumKeyPair cryptoSignSeedKeyPair(byte[] seed32) throws SodiumLibraryException
+    {
+        SodiumKeyPair kp = new SodiumKeyPair();
+        byte[] publicKey = new byte[(int) sodium().crypto_sign_publickeybytes()];
+        byte[] privateKey = new byte[(int) sodium().crypto_sign_secretkeybytes()];
+        int rc = sodium().crypto_sign_seed_keypair(publicKey, privateKey, seed32);
+        if (rc != 0)
+        {
+            throw new SodiumLibraryException("libsodium crypto_sign_seed_keypair() failed, returned " + rc + ", expected 0");
         }
         kp.setPublicKey(publicKey);
         kp.setPrivateKey(privateKey);
@@ -466,19 +516,38 @@ public class SodiumLibrary
                 int alg);
                 */
 
-    public static byte[] cryptoPwhash(byte[] passwd, byte[] salt, long opsLimit, NativeLong memLimit, int algorithm) throws SodiumLibraryException
-    {
-        byte[] key = new byte[sodium().crypto_box_seedbytes().intValue()];
-        
+    public static byte[] cryptoPwhashArgon2idInteractive(byte[] passwd, byte[] salt16)
+            throws SodiumLibraryException {
+        int outBytesLength = cryptoBoxSeedBytes().intValue();
+        return cryptoPwhashArgon2idInteractive(passwd, salt16, outBytesLength);
+    }
+
+    public static byte[] cryptoPwhashArgon2idInteractive(byte[] passwd, byte[] salt16, int outBytesLength)
+            throws SodiumLibraryException {
+        long opsLimit = cryptoPwHashOpsLimitInteractive();
+        NativeLong memLimit = cryptoPwHashMemLimitInterative();
+        return cryptoPwhash(passwd, salt16, outBytesLength, opsLimit, memLimit, cryptoPwhashAlgArgon2id13());
+    }
+    
+    public static byte[] cryptoPwhash(byte[] passwd, byte[] salt16, long opsLimit, NativeLong memLimit, int algorithm)
+            throws SodiumLibraryException {
+        int outBytesLength = cryptoBoxSeedBytes().intValue();
+        return cryptoPwhash(passwd, salt16, outBytesLength, opsLimit, memLimit, algorithm);
+    }
+
+    public static byte[] cryptoPwhash(byte[] passwd, byte[] salt16, int outBytesLength, long opsLimit,
+            NativeLong memLimit, int algorithm) throws SodiumLibraryException {
+        byte[] key = new byte[outBytesLength];
+
         int rc = sodium().crypto_pwhash(key, key.length, 
                 passwd, passwd.length,
-                salt,
+                salt16,
                 opsLimit,
                 memLimit,
                 algorithm);
 
         if (logger.isDebugEnabled()) {
-            logger.debug(">>> NavtiveLong size: " + NativeLong.SIZE * 8 + " bits");
+            logger.debug(">>> NativeLong size: " + NativeLong.SIZE * 8 + " bits");
             logger.debug("crypto_pwhash returned: " + rc);
         }
 
@@ -1007,31 +1076,70 @@ public class SodiumLibrary
         return publicKey;
     }
     
+    /**
+     * 24 bytes
+     */
     public static NativeLong cryptoBoxNonceBytes()
     {
         return sodium().crypto_box_noncebytes();
     }
     
-    public static NativeLong crytoBoxSeedBytes()
+    /**
+     * 32 bytes
+     */
+    public static NativeLong cryptoBoxSeedBytes()
     {
         return sodium().crypto_box_seedbytes();
     }
     
+    // typo version, keep both correct and typo for compatibility
+    @Deprecated
+    public static NativeLong crytoBoxSeedBytes()
+    {
+        return sodium().crypto_box_seedbytes();
+    }
+
+    /**
+     * 32 bytes
+     */
+    public static NativeLong cryptoBoxPublicKeyBytes()
+    {
+        return sodium().crypto_box_publickeybytes();
+    }
+
+    // typo version, keep both correct and typo for compatibility
+    @Deprecated
     public static NativeLong crytoBoxPublicKeyBytes()
     {
         return sodium().crypto_box_publickeybytes();
     }
     
+    /**
+     * 64 bytes
+     */
+    public static NativeLong cryptoBoxSecretKeyBytes()
+    {
+       return sodium().crypto_box_secretkeybytes();
+    }
+
+    // typo version, keep both correct and typo for compatibility
+    @Deprecated
     public static NativeLong crytoBoxSecretKeyBytes()
     {
        return sodium().crypto_box_secretkeybytes();
     }
     
+    /**
+     * 16 bytes
+     */
     public static NativeLong cryptoBoxMacBytes()
     {
         return sodium().crypto_box_macbytes();
     }
     
+    /**
+     * 48 bytes
+     */
     public static NativeLong cryptoBoxSealBytes()
     {
         return sodium().crypto_box_sealbytes();
@@ -1076,6 +1184,9 @@ public class SodiumLibrary
         return sodium().crypto_pwhash_alg_default();
     }
 
+    /**
+     * 16 bytes
+     */
     public static int cryptoPwhashSaltBytes()
     {
         return sodium().crypto_pwhash_saltbytes();
