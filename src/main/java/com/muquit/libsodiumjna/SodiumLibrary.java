@@ -125,8 +125,6 @@ public class SodiumLibrary
                 throw new RuntimeException("Please set the absolute path of the libsodium libary by calling SodiumLibrary.setLibraryPath(path)");
             }
 
-            logger.info("libpath not set, throw exception");
-            throw new RuntimeException("Please set the absolute path of the libsodium libary by calling SodiumLibrary.setLibraryPath(path)");
         }
 
         final Sodium sodium = SingletonHelper.instance;
